@@ -19,24 +19,38 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 
-def parse_lyrics_file(filepath: str) -> tuple[str, list[str]]:
+def parse_lyrics_file(filepath: str) -> tuple[str, list[str], float, str]:
     """
     Parse a lyrics .txt file.
-    First line starting with 'url:' is the YouTube URL.
-    Remaining non-empty lines are the lyrics.
+    Tags:
+    - url: YouTube URL
+    - offset: Decimal offset in seconds (e.g., -0.2)
+    - model: Whisper model size (tiny, base, small, medium, large)
     """
     url = None
     lyrics = []
+    offset = 0.0
+    model_size = None
 
     with open(filepath, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
-            if line.lower().startswith("url:"):
+            if not line:
+                continue
+                
+            line_lower = line.lower()
+            if line_lower.startswith("url:"):
                 url = line[4:].strip()
-            elif line:
+            elif line_lower.startswith("offset:"):
+                try:
+                    offset = float(line[7:].strip())
+                except ValueError:
+                    print(f"WARNING: Invalid offset value in {filepath}")
+            elif line_lower.startswith("model:"):
+                model_size = line[6:].strip()
+            else:
                 lyrics.append(line)
 
-    # If not url, we'll assume the user is providing a local file
     if not url:
         print(f"NOTE: No 'url:' line found in {filepath}. Script will strictly require a local audio file.")
     
@@ -44,7 +58,7 @@ def parse_lyrics_file(filepath: str) -> tuple[str, list[str]]:
         print(f"ERROR: No lyrics found in {filepath}")
         sys.exit(1)
 
-    return url, lyrics
+    return url, lyrics, offset, model_size
 
 
 def download_audio(url: str, output_path: str, song_name: str, lyrics_dir: str = "lyrics") -> str:
@@ -205,6 +219,7 @@ def is_instrumental(line: str) -> bool:
 def match_lyrics_to_segments(
     user_lyrics: list[str],
     segments: list[dict],
+    base_offset: float = -0.20
 ) -> list[tuple[float, str]]:
     """
     Match user-provided lyrics lines to Whisper segments using word-level precision.
@@ -213,8 +228,8 @@ def match_lyrics_to_segments(
     seg_idx = 0
     last_end_time = 0.0
     
-    # Sync offset: Karaoke feels better if lyric appears slightly before the singer starts
-    OFFSET = -0.20 
+    # Use base_offset (default or from .txt file)
+    OFFSET = base_offset 
 
     for lyric_line in user_lyrics:
         # 1. Handle instrumental markers
@@ -232,12 +247,12 @@ def match_lyrics_to_segments(
         best_score = 0.0
         best_start_time = segments[seg_idx]["start"]
         best_end_idx = seg_idx
-        # Look ahead up to 12 segments to find the best match
-        look_ahead = min(seg_idx + 12, len(segments))
+        
+        # Increase lookahead for singing (words can be stretched/transcribed late)
+        look_ahead = min(seg_idx + 15, len(segments))
 
         for start in range(seg_idx, look_ahead):
             combined_text = ""
-            # Combine up to 5 segments to match a single lyric line
             for end in range(start, min(start + 5, len(segments))):
                 combined_text += segments[end]["text"]
                 score = similarity(lyric_line, combined_text)
@@ -250,17 +265,20 @@ def match_lyrics_to_segments(
                     else:
                         best_start_time = segments[start]["start"]
                     best_end_idx = end
+            
+            # If we found an extremely high confidence match, stop looking further
+            if best_score > 0.9:
+                break
 
         # 4. Resolve match
-        if best_score >= 0.25:
-            # Good match found
+        if best_score >= 0.20: # Lowered threshold slightly for singing, but added resilience
             final_time = best_start_time + OFFSET
             results.append((max(0, final_time), lyric_line))
             last_end_time = segments[best_end_idx]["end"]
             seg_idx = best_end_idx + 1
         else:
-            # Low confidence match - use the next available segment but flag it?
-            # In karaoke, it's better to have a timestamped lyric even if wrong
+            # Low confidence - skip current vocal segment to catch up? 
+            # Or just use current segment if it's "mostly" quiet
             final_time = segments[seg_idx]["start"] + OFFSET
             results.append((max(0, final_time), lyric_line))
             last_end_time = segments[seg_idx]["end"]
@@ -318,10 +336,17 @@ def main():
         return
 
     # Parse lyrics file
-    url, lyrics = parse_lyrics_file(str(input_path))
+    url, lyrics, file_offset, file_model = parse_lyrics_file(str(input_path))
+    
+    # Priority: model from file > model from command line argument
+    model_to_use = file_model if file_model else args.model
+    
     print(f"Song: {input_path.stem}")
-    print(f"URL: {url}")
+    if url:
+        print(f"URL: {url}")
     print(f"Lyrics lines: {len(lyrics)}")
+    print(f"Sync Offset: {file_offset}s")
+    print(f"Whisper Model: {model_to_use}")
     print()
 
     # Create temp directory for audio
@@ -334,12 +359,12 @@ def main():
         print()
 
         # Step 2: Transcribe with Whisper
-        segments = transcribe_audio(audio_file, args.model)
+        segments = transcribe_audio(audio_file, model_to_use)
         print()
 
         # Step 3: Match lyrics to segments
         print("Matching lyrics to timestamps...")
-        matched = match_lyrics_to_segments(lyrics, segments)
+        matched = match_lyrics_to_segments(lyrics, segments, base_offset=file_offset)
         print()
 
         # Step 4: Generate Lua output
