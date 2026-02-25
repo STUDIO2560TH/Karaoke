@@ -222,13 +222,21 @@ def match_lyrics_to_segments(
     base_offset: float = -0.20
 ) -> list[tuple[float, str]]:
     """
-    Match user-provided lyrics lines to Whisper segments using word-level precision.
+    Match user-provided lyrics lines to AI-transcribed words using a global pool.
+    This handles cases where one segment contains multiple lyric lines.
     """
-    results = []
-    seg_idx = 0
-    last_end_time = 0.0
+    # 1. Flatten all words into a single list
+    all_words = []
+    for s in segments:
+        if s.get("words"):
+            all_words.extend(s["words"])
+        else:
+            # If no word timestamps, treat the whole segment as one "word"
+            all_words.append({"start": s["start"], "end": s["end"], "text": s["text"]})
     
-    # Use base_offset (default or from .txt file)
+    results = []
+    word_idx = 0
+    last_end_time = 0.0
     OFFSET = base_offset 
 
     for lyric_line in user_lyrics:
@@ -237,52 +245,51 @@ def match_lyrics_to_segments(
             results.append((max(0, last_end_time + OFFSET), lyric_line))
             continue
 
-        # 2. Check if we've run out of audio segments
-        if seg_idx >= len(segments):
-            results.append((last_end_time + 1.5, lyric_line))
-            last_end_time += 3.0
+        # 2. Check if we've run out of words
+        if word_idx >= len(all_words):
+            # No more words - estimate based on last word or just 1.5s gap
+            est_time = last_end_time + 1.5
+            results.append((est_time + OFFSET, lyric_line))
+            last_end_time = est_time + 1.5
             continue
 
-        # 3. Try matching this lyric line against upcoming segments (best of N)
+        # 3. Try matching this lyric line against a sliding window of words
         best_score = 0.0
-        best_start_time = segments[seg_idx]["start"]
-        best_end_idx = seg_idx
+        best_start_time = all_words[word_idx]["start"]
+        best_end_word_idx = word_idx
         
-        # Increase lookahead for singing (words can be stretched/transcribed late)
-        look_ahead = min(seg_idx + 15, len(segments))
+        # Look ahead up to 25 words to find the best match
+        look_ahead = min(word_idx + 25, len(all_words))
 
-        for start in range(seg_idx, look_ahead):
+        for start in range(word_idx, look_ahead):
             combined_text = ""
-            for end in range(start, min(start + 5, len(segments))):
-                combined_text += segments[end]["text"]
+            # Combine up to 10 words to match a single lyric line
+            for end in range(start, min(start + 10, len(all_words))):
+                combined_text += all_words[end]["text"]
                 score = similarity(lyric_line, combined_text)
 
                 if score > best_score:
                     best_score = score
-                    # Use first word start if available for higher precision
-                    if segments[start].get("words") and len(segments[start]["words"]) > 0:
-                        best_start_time = segments[start]["words"][0]["start"]
-                    else:
-                        best_start_time = segments[start]["start"]
-                    best_end_idx = end
+                    best_start_time = all_words[start]["start"]
+                    best_end_word_idx = end
             
-            # If we found an extremely high confidence match, stop looking further
-            if best_score > 0.9:
+            # Fast-break on high confidence
+            if best_score > 0.85:
                 break
 
         # 4. Resolve match
-        if best_score >= 0.20: # Lowered threshold slightly for singing, but added resilience
+        # Lower threshold for short lines or difficult vocals, but maintain order
+        if best_score >= 0.15:
             final_time = best_start_time + OFFSET
             results.append((max(0, final_time), lyric_line))
-            last_end_time = segments[best_end_idx]["end"]
-            seg_idx = best_end_idx + 1
+            last_end_time = all_words[best_end_word_idx]["end"]
+            word_idx = best_end_word_idx + 1
         else:
-            # Low confidence - skip current vocal segment to catch up? 
-            # Or just use current segment if it's "mostly" quiet
-            final_time = segments[seg_idx]["start"] + OFFSET
+            # Fallback: Just use the current word's time and move one word forward
+            final_time = all_words[word_idx]["start"] + OFFSET
             results.append((max(0, final_time), lyric_line))
-            last_end_time = segments[seg_idx]["end"]
-            seg_idx += 1
+            last_end_time = all_words[word_idx]["end"]
+            word_idx += 1
 
     return results
 
