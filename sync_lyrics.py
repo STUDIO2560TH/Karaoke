@@ -440,10 +440,7 @@ def generate_lua_subtitles(matched: list[tuple[float, str]]) -> str:
             ordered_keys.append(time_str)
         else:
             # Merge duplicate timestamps with a space (user request)
-            if not lyric.startswith("(") and not merged[time_str].endswith(")"):
-                merged[time_str] += " " + lyric
-            else:
-                merged[time_str] += " " + lyric
+            merged[time_str] += " " + lyric
 
     lines = []
     lines.append('["Subtitles"] =')
