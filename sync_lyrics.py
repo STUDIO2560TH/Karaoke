@@ -188,26 +188,38 @@ def transcribe_audio(audio_path: str, model_size: str = "small") -> list[dict]:
     return segments
 
 
-def normalize_text(text: str) -> str:
+def normalize_text(text: str, aggressive: bool = False) -> str:
     """Normalize text for comparison — remove spaces, punctuation, tone marks, etc."""
-    # 1. Lowercase and strip
     text = text.lower().strip()
-    # 2. Remove Thai tone marks (may help with fuzzy matching if transcription is slightly off)
-    # Thai tone marks: \u0E48 (mai ek), \u0E49 (mai tho), \u0E4A (mai tri), \u0E4B (mai chattawa)
-    # Also \u0E4C (thanthakhat), \u0E4D (nikhahit), \u0E47 (mai taikhu)
-    text = re.sub(r'[\u0E47-\u0E4E]', '', text)
-    # 3. Remove common non-lyric characters, keep Thai chars and alphanumeric
+    
+    # Aggressive: Remove all Thai vowels and tone marks to find the "skeleton" of the words
+    # This helps significantly with singing where vowels are stretched or tone marks are ignored.
+    if aggressive:
+        # Thai vowels and tone marks range
+        text = re.sub(r'[\u0E30-\u0E4E]', '', text)
+        
+    # Remove common non-lyric characters, keep Thai chars and alphanumeric
     text = re.sub(r'[^\u0E00-\u0E7F\w]', '', text)
     return text
 
 
 def similarity(a: str, b: str) -> float:
-    """Compute similarity ratio between two strings."""
-    na = normalize_text(a)
-    nb = normalize_text(b)
-    if not na or not nb:
-        return 0.0
-    return SequenceMatcher(None, na, nb).ratio()
+    """Compute similarity ratio between two strings using aggressive Thai normalization."""
+    # Try normal normalization first
+    na = normalize_text(a, aggressive=False)
+    nb = normalize_text(b, aggressive=False)
+    if not na or not nb: return 0.0
+    score = SequenceMatcher(None, na, nb).ratio()
+    
+    # If score is low, try aggressive (consonant-only) matching
+    if score < 0.6:
+        na_aggr = normalize_text(a, aggressive=True)
+        nb_aggr = normalize_text(b, aggressive=True)
+        if na_aggr and nb_aggr:
+            aggr_score = SequenceMatcher(None, na_aggr, nb_aggr).ratio()
+            score = max(score, aggr_score * 0.8) # Weight aggressive score slightly lower
+            
+    return score
 
 
 def is_instrumental(line: str) -> bool:
@@ -223,77 +235,116 @@ def match_lyrics_to_segments(
 ) -> list[tuple[float, str]]:
     """
     Match user-provided lyrics lines to AI-transcribed words using a global pool.
-    This handles cases where one segment contains multiple lyric lines.
+    Uses interpolation for unmatched lines to prevent "jumping" or "skipping".
     """
-    # 1. Flatten all words into a single list
+    # 1. Flatten all words into a pool
     all_words = []
     for s in segments:
         if s.get("words"):
             all_words.extend(s["words"])
         else:
-            # If no word timestamps, treat the whole segment as one "word"
             all_words.append({"start": s["start"], "end": s["end"], "text": s["text"]})
+    
+    print(f"DEBUG: Processing {len(all_words)} transcribed words against {len(user_lyrics)} lyrics lines.")
     
     results = []
     word_idx = 0
-    last_end_time = 0.0
+    last_word_time = 0.0
     OFFSET = base_offset 
 
-    for lyric_line in user_lyrics:
-        # 1. Handle instrumental markers
+    # We'll first pass through and find high-confidence matches
+    # Then we'll interpolate the "missing" ones if any.
+    
+    matches = [] # List of (lyric_idx, timestamp_start, timestamp_end, confidence)
+    
+    for l_idx, lyric_line in enumerate(user_lyrics):
         if is_instrumental(lyric_line):
-            results.append((max(0, last_end_time + OFFSET), lyric_line))
+            matches.append((l_idx, -1, -1, 1.0)) # Magic value for instrumentals
             continue
 
-        # 2. Check if we've run out of words
         if word_idx >= len(all_words):
-            # No more words - estimate based on last word or just 1.5s gap
-            est_time = last_end_time + 1.5
-            results.append((est_time + OFFSET, lyric_line))
-            last_end_time = est_time + 1.5
+            matches.append((l_idx, None, None, 0.0))
             continue
 
-        # 3. Try matching this lyric line against a sliding window of words
         best_score = 0.0
-        best_start_time = all_words[word_idx]["start"]
-        best_end_word_idx = word_idx
+        best_start = all_words[word_idx]["start"]
+        best_end = all_words[word_idx]["end"]
+        best_w_idx = word_idx
         
-        # Look ahead up to 25 words to find the best match
-        look_ahead = min(word_idx + 25, len(all_words))
-
+        # Look ahead window (up to 40 words)
+        look_ahead = min(word_idx + 40, len(all_words))
         for start in range(word_idx, look_ahead):
-            combined_text = ""
-            # Combine up to 10 words to match a single lyric line
-            for end in range(start, min(start + 10, len(all_words))):
-                combined_text += all_words[end]["text"]
-                score = similarity(lyric_line, combined_text)
-
+            combined = ""
+            for end in range(start, min(start + 12, len(all_words))):
+                combined += all_words[end]["text"]
+                score = similarity(lyric_line, combined)
                 if score > best_score:
                     best_score = score
-                    best_start_time = all_words[start]["start"]
-                    best_end_word_idx = end
-            
-            # Fast-break on high confidence
-            if best_score > 0.85:
-                break
+                    best_start = all_words[start]["start"]
+                    best_end = all_words[end]["end"]
+                    best_w_idx = end
+            if best_score > 0.9: break # Short circuit on perfect match
 
-        # 4. Resolve match
-        # Lower threshold for short lines or difficult vocals, but maintain order
-        if best_score >= 0.15:
-            final_time = best_start_time + OFFSET
-            results.append((max(0, final_time), lyric_line))
-            last_end_time = all_words[best_end_word_idx]["end"]
-            word_idx = best_end_word_idx + 1
+        if best_score >= 0.25:
+            matches.append((l_idx, best_start, best_end, best_score))
+            word_idx = best_w_idx + 1
         else:
-            # Fallback: Just use the current word's time and move one word forward
-            final_time = all_words[word_idx]["start"] + OFFSET
-            results.append((max(0, final_time), lyric_line))
-            last_end_time = all_words[word_idx]["end"]
-            word_idx += 1
+            matches.append((l_idx, None, None, 0.0))
 
-    return results
+    # Second pass: Interpolation for missing timestamps
+    total_audio_duration = segments[-1]["end"] if segments else 0.0
+    
+    final_results = []
+    for i in range(len(matches)):
+        l_idx, start, end, score = matches[i]
+        lyric_text = user_lyrics[l_idx]
+        
+        if start is not None and start != -1:
+            # High confidence match
+            final_results.append((max(0, start + OFFSET), lyric_text))
+            last_word_time = end
+        elif start == -1:
+            # Instrumental - keep it near the last vocal or slightly after
+            final_results.append((max(0, last_word_time + OFFSET), lyric_text))
+        else:
+            # Missing match - Interpolate!
+            # Find next valid match to determine the gap
+            next_valid = None
+            consecutive_missing = 0
+            for j in range(i, len(matches)):
+                if matches[j][1] is not None and matches[j][1] != -1:
+                    next_valid = matches[j]
+                    break
+                consecutive_missing += 1
+            
+            if next_valid:
+                # Interpolate between last_word_time and next_valid[1]
+                gap = next_valid[1] - last_word_time
+                # We are at the 'k-th' missing line in a block of 'consecutive_missing'
+                # But since we're in a loop, we can just take the first 'step'
+                # Find how many missing lines are in THIS specific block
+                block_size = 0
+                for j in range(i, len(matches)):
+                    if matches[j][1] is not None and matches[j][1] != -1: break
+                    block_size += 1
+                
+                # Distribution constant: spread them out
+                increment = gap / (block_size + 1)
+                est_time = last_word_time + increment
+                final_results.append((max(0, est_time + OFFSET), lyric_text))
+                last_word_time = est_time
+            else:
+                # No more valid matches - just tiny steps to end of audio
+                remaining_lines = 0
+                for j in range(i, len(matches)): remaining_lines += 1
+                
+                time_to_end = max(1.0, total_audio_duration - last_word_time)
+                increment = time_to_end / (remaining_lines + 1)
+                est_time = last_word_time + increment
+                final_results.append((max(0, est_time + OFFSET), lyric_text))
+                last_word_time = est_time
 
-    return results
+    return final_results
 
 
 def format_time(seconds: float) -> str:
@@ -323,8 +374,8 @@ def main():
     parser = argparse.ArgumentParser(description="Auto Sync Lyrics Tool")
     parser.add_argument("input", help="Path to lyrics .txt file")
     parser.add_argument(
-        "--model", default="medium",
-        help="Whisper model size: tiny, base, small, medium, large (default: medium)"
+        "--model", default="large-v3",
+        help="Whisper model size: tiny, base, small, medium, large-v3 (default: large-v3)"
     )
     parser.add_argument(
         "--output", default="output",
