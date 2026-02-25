@@ -25,8 +25,15 @@ Second lyrics line
 Third lyrics line
 ...
 ```
-- First line (Optional): `url:` followed by the YouTube URL.
+- Line 1 (Optional): `url:` followed by the YouTube URL.
+- Line 2 (Optional): `offset:` followed by seconds (e.g., `-0.5` to make lyrics appear earlier).
+- Line 3 (Optional): `model:` followed by Whisper model (e.g., `large-v3` for higher accuracy).
 - `🎶` marks instrumental/music sections.
+
+### 2. Fine-tuning Accuracy
+If the timing is slightly off, you can add an `offset:` line to the top of your text file:
+- Use a **negative number** (like `offset: -0.5`) if the lyrics appear **too late**.
+- Use a **positive number** (like `offset: 0.2`) if the lyrics appear **too early**.
 
 ### 2. Bypass YouTube blocks (Optional)
 
