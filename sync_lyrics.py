@@ -47,8 +47,43 @@ def parse_lyrics_file(filepath: str) -> tuple[str, list[str]]:
     return url, lyrics
 
 
-def download_audio(url: str, output_path: str) -> str:
-    """Download audio from YouTube URL using yt-dlp, returns path to audio file."""
+def download_audio(url: str, output_path: str, song_name: str, lyrics_dir: str = "lyrics") -> str:
+    """
+    Check for local audio file first, otherwise download from YouTube.
+    Returns path to a usable audio file (translated to WAV if necessary).
+    """
+    # Step 0: Check for local audio file first
+    audio_extensions = [".mp3", ".wav", ".m4a", ".ogg", ".opus", ".flac"]
+    local_audio = None
+    
+    # Try to find a file with the same name as the lyrics file in the lyrics directory
+    if os.path.exists(lyrics_dir):
+        for ext in audio_extensions:
+            potential_file = os.path.join(lyrics_dir, f"{song_name}{ext}")
+            if os.path.exists(potential_file):
+                local_audio = potential_file
+                break
+    
+    if local_audio:
+        print(f"Using local audio file found: {local_audio}")
+        # If it's already a wav, just copy it to tmp (or use it directly)
+        target_wav = os.path.join(output_path, "audio.wav")
+        if local_audio.lower().endswith(".wav"):
+            import shutil
+            shutil.copy(local_audio, target_wav)
+        else:
+            # Convert to wav using ffmpeg
+            print(f"Converting {local_audio} to wav...")
+            cmd = ["ffmpeg", "-i", local_audio, "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", target_wav, "-y"]
+            subprocess.run(cmd, capture_output=True)
+            
+        if os.path.exists(target_wav):
+            return target_wav
+        else:
+            print("ERROR: Failed to prepare local audio file.")
+            sys.exit(1)
+
+    # Step 1: Download from YouTube if no local file
     audio_file = os.path.join(output_path, "audio.wav")
 
     cmd = [
@@ -70,6 +105,8 @@ def download_audio(url: str, output_path: str) -> str:
 
     if result.returncode != 0:
         print(f"ERROR downloading audio:\n{result.stderr}")
+        print("\nTIP: If YouTube is blocking the download, try uploading the song file (.mp3 or .wav)")
+        print(f"directly to the 'lyrics/' folder with the same name as your text file.")
         sys.exit(1)
 
     # yt-dlp might create the file with a different name during conversion
@@ -247,6 +284,11 @@ def main():
         print(f"ERROR: File not found: {input_path}")
         sys.exit(1)
 
+    # Skip audio files if they are passed as the main input (the workflow loop might hit them)
+    if input_path.suffix.lower() in [".mp3", ".wav", ".m4a", ".ogg", ".opus", ".flac"]:
+        print(f"Skipping audio file: {input_path} (it will be used as a source for the corresponding lyrics file)")
+        return
+
     # Parse lyrics file
     url, lyrics = parse_lyrics_file(str(input_path))
     print(f"Song: {input_path.stem}")
@@ -259,8 +301,8 @@ def main():
     tmp_dir.mkdir(exist_ok=True)
 
     try:
-        # Step 1: Download audio
-        audio_file = download_audio(url, str(tmp_dir))
+        # Step 1: Download audio (checks for local file first)
+        audio_file = download_audio(url, str(tmp_dir), input_path.stem, str(input_path.parent))
         print()
 
         # Step 2: Transcribe with Whisper

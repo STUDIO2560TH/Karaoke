@@ -70,7 +70,7 @@ jobs:
         if: steps.check.outputs.found == 'true'
         run: |
           find lyrics -type f ! -name ".gitkeep" -delete
-          echo "Processed files deleted."
+          echo "Processed text and audio files deleted."
 
       - name: Commit and push results
         if: steps.check.outputs.found == 'true'
