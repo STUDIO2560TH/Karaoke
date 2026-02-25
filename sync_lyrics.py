@@ -298,13 +298,12 @@ def match_lyrics_to_segments(
                     best_w_idx = end
             if best_score > 0.9: break
 
-        # Pass criteria - raise Skeleton threshold slightly to avoid noise clumping
         if best_score >= 0.18:
             conf_str = "Strict" if best_score > 0.6 else "Fuzzy" if best_score > 0.3 else "Skeleton"
             print(f"  [{conf_str}] Line {l_idx+1}: '{lyric_line[:15]}...' -> {format_time(best_start)} (conf: {best_score:.2f})")
             matches.append((l_idx, best_start, best_end, best_score))
-            # Advance word_idx but allow slight lookback for next match overlaps
-            word_idx = max(word_idx + 1, best_w_idx - 1)
+            # FORWARD SEARCH ONLY: Always consume words. This prevents chorus confusion.
+            word_idx = best_w_idx + 1
         else:
             print(f"  [Miss]   Line {l_idx+1}: '{lyric_line[:15]}...' (best conf: {best_score:.2f})")
             matches.append((l_idx, None, None, 0.0))
@@ -323,11 +322,11 @@ def match_lyrics_to_segments(
         
         # 1. High-confidence match or manual music break "🎶"
         if (start is not None and start != -1) or is_instrumental(lyric_text):
-            # MONOTONE: Never move backwards. Minimum 1.0s gap between lines.
-            final_start = max(last_word_time + 1.0, start if start != -1 else last_word_time + 1.0)
+            # MONOTONE: Never move backwards. Minimum 0.8s gap between valid lines.
+            final_start = max(last_word_time + 0.8, start if start != -1 else last_word_time + 1.0)
             
-            # Auto-insert music bridge for huge gaps (e.g. 10s of silence)
-            if start != -1 and start - last_word_time > 10.0:
+            # Auto-insert music bridge for huge gaps (e.g. 12s of silence)
+            if start != -1 and start - last_word_time > 12.0:
                 final_results.append((last_word_time + 1.5 + OFFSET, "🎶"))
             
             final_results.append((final_start + OFFSET, lyric_text))
@@ -340,31 +339,20 @@ def match_lyrics_to_segments(
                 j += 1
             
             num_missing = j - i
-            
-            # Find the next reliable timestamp to aim for
             next_anchor = audio_end
             if j < len(matches) and matches[j][1] is not None and matches[j][1] != -1:
                 next_anchor = matches[j][1]
             
-            # Gap available for distribution
             total_gap = next_anchor - last_word_time
             
-            # Auto-Music Bridge logic for large gaps with few lines
-            if total_gap > (num_missing * 5.0) + 7.0:
-                music_start = last_word_time + 1.0
-                final_results.append((music_start + OFFSET, "🎶"))
-                last_word_time += 2.0
-                total_gap -= 2.0
-
-            # Distribute lines
-            # Ensure at least 2.5s spacing for miss cases (likely silence or instrumental)
-            spacing = max(2.5, total_gap / (num_missing + 1))
+            # Use smaller spacing (1.5s) for misses to keep it from feeling "too slow"
+            spacing = max(1.5, total_gap / (num_missing + 1))
             
             for k in range(num_missing):
                 est_time = last_word_time + spacing
-                # MONOTONE: Do not overshoot next anchor
-                if est_time >= next_anchor - 1.0:
-                    est_time = next_anchor - 1.0
+                # Safety clamp: don't crowd the next anchor if we don't have enough gap
+                if est_time >= next_anchor - 0.8:
+                    est_time = next_anchor - 0.8
                 
                 final_results.append((est_time + OFFSET, user_lyrics[matches[i+k][0]]))
                 last_word_time = est_time
