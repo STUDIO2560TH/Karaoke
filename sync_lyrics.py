@@ -265,6 +265,8 @@ def match_lyrics_to_segments(
     
     matches = [] # List of (lyric_idx, timestamp_start, timestamp_end, confidence)
     
+    thresholds = [0.4, 0.25, 0.12] # Multi-pass thresholds: Strict, Fuzzy, Skeleton
+    
     for l_idx, lyric_line in enumerate(user_lyrics):
         if is_instrumental(lyric_line):
             matches.append((l_idx, -1, -1, 1.0))
@@ -280,9 +282,10 @@ def match_lyrics_to_segments(
         best_w_idx = word_idx
         
         # Look ahead window
-        look_ahead = min(word_idx + 80, len(all_words)) # Increased lookahead
+        look_ahead = min(word_idx + 80, len(all_words))
         for start in range(word_idx, look_ahead):
             combined = ""
+            # Try combining up to 15 words
             for end in range(start, min(start + 15, len(all_words))):
                 combined += all_words[end]["text"]
                 score = similarity(lyric_line, combined)
@@ -293,20 +296,20 @@ def match_lyrics_to_segments(
                     best_w_idx = end
             if best_score > 0.9: break
 
-        # Lower threshold for complex singing, but require some substance
-        if best_score >= 0.12: # Even more permissive
-            print(f"  [Match] Line {l_idx+1}: '{lyric_line[:20]}...' -> {format_time(best_start)} (conf: {best_score:.2f})")
+        # Pass criteria
+        if best_score >= 0.12:
+            conf_str = "Strict" if best_score > 0.6 else "Fuzzy" if best_score > 0.3 else "Skeleton"
+            print(f"  [{conf_str}] Line {l_idx+1}: '{lyric_line[:15]}...' -> {format_time(best_start)} (conf: {best_score:.2f})")
             matches.append((l_idx, best_start, best_end, best_score))
+            # Advance word_idx but allow slight lookback for next match overlaps
             word_idx = max(word_idx + 1, best_w_idx - 1)
         else:
-            print(f"  [Miss]  Line {l_idx+1}: '{lyric_line[:20]}...' (best conf: {best_score:.2f})")
+            print(f"  [Miss]   Line {l_idx+1}: '{lyric_line[:15]}...' (best conf: {best_score:.2f})")
             matches.append((l_idx, None, None, 0.0))
-            # Forced advancement: If we have many misses, slowly nudge word_idx
-            # but for global alignment, we can also stay put and let interpolation work.
 
     # 2. Second pass: Interpolation for missing timestamps
     # Fallback duration if AI found nothing
-    total_audio_duration = segments[-1]["end"] if segments else 180.0
+    audio_end = segments[-1]["end"] if segments else all_words[-1]["end"] if all_words else 180.0
     
     final_results = []
     for i in range(len(matches)):
@@ -333,15 +336,17 @@ def match_lyrics_to_segments(
                     if matches[j][1] is not None and matches[j][1] != -1: break
                     block_size += 1
                 
+                # Split the gap evenly, but limit speed
                 increment = gap / (block_size + 1)
                 est_time = last_word_time + increment
                 final_results.append((max(0, est_time + OFFSET), lyric_text))
                 last_word_time = est_time
             else:
-                # No more matches - split remaining time proportionally
+                # No more matches - spread to the end of audio
                 remaining_lines = len(matches) - i
-                time_to_end = max(10.0, total_audio_duration - last_word_time)
-                increment = time_to_end / (remaining_lines + 2)
+                time_to_end = max(10.0, audio_end - last_word_time)
+                # Ensure we don't bunch up everything at the end
+                increment = min(3.0, time_to_end / (remaining_lines + 2))
                 est_time = last_word_time + increment
                 final_results.append((max(0, est_time + OFFSET), lyric_text))
                 last_word_time = est_time

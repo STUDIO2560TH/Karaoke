@@ -62,7 +62,8 @@ jobs:
             echo "========================================"
             echo "Processing: $file"
             echo "========================================"
-            python sync_lyrics.py "$file" --model small --output output
+            # Removed --model small to allow script/tag defaults
+            python sync_lyrics.py "$file" --output output
             echo ""
           done
 
