@@ -314,57 +314,61 @@ def match_lyrics_to_segments(
     
     final_results = []
     last_word_time = 0.0
+    
     i = 0
     while i < len(matches):
         l_idx, start, end, score = matches[i]
         lyric_text = user_lyrics[l_idx]
         
-        # If it's a match (or magic instrumental)
-        if (start is not None and start != -1) or start == -1:
-            if start == -1: # Instrumental
-                final_results.append((max(0, last_word_time + OFFSET), lyric_text))
-            else:
-                # High confidence match
-                final_time = max(last_word_time + 0.5, start)
-                final_results.append((max(0, final_time + OFFSET), lyric_text))
-                last_word_time = max(final_time, end)
+        # If it's a high-confidence match
+        if start is not None and start != -1:
+            # Detect long gaps before this match to insert music bridge
+            if start - last_word_time > 8.0:
+                final_results.append((last_word_time + 1.5, "🎶"))
+            
+            # Ensure we always move forward by at least 1.0s to avoid clumping
+            final_time = max(last_word_time + 1.0, start)
+            final_results.append((max(0, final_time + OFFSET), lyric_text))
+            last_word_time = max(final_time + 0.5, end)
+            i += 1
+        elif start == -1: # User provided instrumental 🎶
+            final_results.append((max(0, last_word_time + 1.0 + OFFSET), lyric_text))
+            last_word_time += 1.5
             i += 1
         else:
-            # Block of missing matches - find how many
+            # Block of missing matches
             j = i
-            while j < len(matches) and matches[j][1] is None:
+            while j < len(matches) and (matches[j][1] is None or matches[j][1] == -1):
                 j += 1
+                if j < len(matches) and is_instrumental(user_lyrics[matches[j][0]]):
+                    break
             
             num_missing = j - i
+            next_anchor = audio_end
+            if j < len(matches) and matches[j][1] is not None and matches[j][1] != -1:
+                next_anchor = matches[j][1]
             
-            # Find next anchor point
-            next_anchor_time = audio_end
-            if j < len(matches):
-                if matches[j][1] != -1: # Valid match
-                    next_anchor_time = matches[j][1]
-                else: # Instrumental
-                    # Keep looking for a real timestamp
-                    for k in range(j, len(matches)):
-                        if matches[k][1] is not None and matches[k][1] != -1:
-                            next_anchor_time = matches[k][1]
-                            break
+            # Gap to fill
+            total_gap = next_anchor - last_word_time
             
-            # Distribute num_missing lines between last_word_time and next_anchor_time
-            gap = next_anchor_time - last_word_time
-            # Standard spacing: divide gap by lines+1. But enforce MINIMUM 1.5s gap.
-            spacing = max(1.5, gap / (num_missing + 1))
+            # Auto-insert music break if the gap is huge relative to missing lines
+            if total_gap > (num_missing * 4.0) + 6.0:
+                final_results.append((last_word_time + 1.0, "🎶"))
+                last_word_time += 2.0
+                total_gap -= 2.0
+
+            # Distribute missing lines
+            spacing = max(2.0, total_gap / (num_missing + 1))
             
             for k in range(num_missing):
-                est_time = last_word_time + (k + 1) * spacing
-                # Safety: ensure we don't bunch up against the next anchor
-                if est_time >= next_anchor_time - 0.5:
-                    # Compress the remaining missing lines at 0.5s intervals if we run out of space
-                    est_time = next_anchor_time - (num_missing - k) * 0.5
+                est_time = last_word_time + spacing
+                # Clamp to avoid overshooting
+                if est_time >= next_anchor - 1.0:
+                    est_time = next_anchor - 1.0
                 
-                final_results.append((max(0, est_time + OFFSET), user_lyrics[matches[i + k][0]]))
+                final_results.append((max(0, est_time + OFFSET), user_lyrics[matches[i+k][0]]))
+                last_word_time = est_time
             
-            # Update last_word_time to the point we just "filled" up to
-            last_word_time = last_word_time + num_missing * spacing
             i = j
 
     return final_results
@@ -429,28 +433,28 @@ def format_time(seconds: float) -> str:
 
 def generate_lua_subtitles(matched: list[tuple[float, str]]) -> str:
     """Generate the Lua Subtitles table, merging lines with identical timestamps."""
-    # First, collect and merge lines by their formatted M:SS time string
-    merged = {}
-    ordered_keys = []
+    # Step 1: Group by time_str
+    groups = {}
+    ordered_times = []
     
     for timestamp, lyric in matched:
-        time_str = format_time(timestamp)
-        if time_str not in merged:
-            merged[time_str] = lyric
-            ordered_keys.append(time_str)
-        else:
-            # Merge duplicate timestamps with a space (user request)
-            merged[time_str] += " " + lyric
+        t_str = format_time(timestamp)
+        if t_str not in groups:
+            groups[t_str] = []
+            ordered_times.append(t_str)
+        
+        # Don't add duplicate text if it somehow matched the same thing twice
+        if lyric not in groups[t_str]:
+            groups[t_str].append(lyric)
 
-    lines = []
-    lines.append('["Subtitles"] =')
-    lines.append('{')
-
-    for time_str in ordered_keys:
-        lyric = merged[time_str]
-        # Escape special Lua characters in lyrics
-        escaped = lyric.replace('\\', '\\\\').replace('"', '\\"')
-        lines.append(f'\t["{time_str}"] = "{escaped}",')
+    # Step 2: Build the Lua table
+    lines = ['["Subtitles"] =', '{']
+    
+    for t_str in ordered_times:
+        combined_text = " ".join(groups[t_str])
+        # Escape special Lua characters
+        escaped = combined_text.replace('\\', '\\\\').replace('"', '\\"')
+        lines.append(f'\t["{t_str}"] = "{escaped}",')
 
     lines.append('},')
     return '\n'.join(lines)
