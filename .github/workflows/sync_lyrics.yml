@@ -39,6 +39,12 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install Deno (JS runtime for yt-dlp)
+        if: steps.check.outputs.found == 'true'
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
       - name: Install system dependencies
         if: steps.check.outputs.found == 'true'
         run: |
