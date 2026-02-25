@@ -139,19 +139,29 @@ def transcribe_audio(audio_path: str, model_size: str = "small") -> list[dict]:
         audio_path,
         language="th",
         beam_size=5,
-        word_timestamps=False,
+        word_timestamps=True,  # Precision improvement
         vad_filter=True,
         vad_parameters=dict(
-            min_silence_duration_ms=300,
+            min_silence_duration_ms=400,  # Adjusted for singing
         ),
     )
 
     segments = []
     for seg in segments_gen:
+        words = []
+        if seg.words:
+            for w in seg.words:
+                words.append({
+                    "start": w.start,
+                    "end": w.end,
+                    "text": w.word.strip()
+                })
+        
         segments.append({
             "start": seg.start,
             "end": seg.end,
             "text": seg.text.strip(),
+            "words": words
         })
         print(f"  [{format_time(seg.start)}] {seg.text.strip()}")
 
@@ -160,10 +170,15 @@ def transcribe_audio(audio_path: str, model_size: str = "small") -> list[dict]:
 
 
 def normalize_text(text: str) -> str:
-    """Normalize text for comparison — remove spaces, punctuation, lowercase."""
-    # Remove common non-lyric characters
-    text = re.sub(r'[^\u0E00-\u0E7F\w]', '', text)  # Keep Thai chars and word chars
+    """Normalize text for comparison — remove spaces, punctuation, tone marks, etc."""
+    # 1. Lowercase and strip
     text = text.lower().strip()
+    # 2. Remove Thai tone marks (may help with fuzzy matching if transcription is slightly off)
+    # Thai tone marks: \u0E48 (mai ek), \u0E49 (mai tho), \u0E4A (mai tri), \u0E4B (mai chattawa)
+    # Also \u0E4C (thanthakhat), \u0E4D (nikhahit), \u0E47 (mai taikhu)
+    text = re.sub(r'[\u0E47-\u0E4E]', '', text)
+    # 3. Remove common non-lyric characters, keep Thai chars and alphanumeric
+    text = re.sub(r'[^\u0E00-\u0E7F\w]', '', text)
     return text
 
 
@@ -187,58 +202,66 @@ def match_lyrics_to_segments(
     segments: list[dict],
 ) -> list[tuple[float, str]]:
     """
-    Match user-provided lyrics lines to Whisper segments.
-
-    Uses greedy forward matching with text similarity,
-    enforcing chronological order.
-
-    Returns: [(timestamp_seconds, lyric_line), ...]
+    Match user-provided lyrics lines to Whisper segments using word-level precision.
     """
     results = []
     seg_idx = 0
     last_end_time = 0.0
+    
+    # Sync offset: Karaoke feels better if lyric appears slightly before the singer starts
+    OFFSET = -0.20 
 
     for lyric_line in user_lyrics:
-        # Handle instrumental markers
+        # 1. Handle instrumental markers
         if is_instrumental(lyric_line):
-            # Place at the end of the previous segment (or 0 for start)
-            results.append((last_end_time, lyric_line))
+            results.append((max(0, last_end_time + OFFSET), lyric_line))
             continue
 
+        # 2. Check if we've run out of audio segments
         if seg_idx >= len(segments):
-            # No more Whisper segments — estimate timestamp
-            results.append((last_end_time + 1.0, lyric_line))
+            results.append((last_end_time + 1.5, lyric_line))
             last_end_time += 3.0
             continue
 
-        # Try matching this lyric line against upcoming segments
+        # 3. Try matching this lyric line against upcoming segments (best of N)
         best_score = 0.0
         best_start_time = segments[seg_idx]["start"]
         best_end_idx = seg_idx
-        look_ahead = min(seg_idx + 8, len(segments))
+        # Look ahead up to 12 segments to find the best match
+        look_ahead = min(seg_idx + 12, len(segments))
 
         for start in range(seg_idx, look_ahead):
             combined_text = ""
-            for end in range(start, min(start + 4, len(segments))):
+            # Combine up to 5 segments to match a single lyric line
+            for end in range(start, min(start + 5, len(segments))):
                 combined_text += segments[end]["text"]
                 score = similarity(lyric_line, combined_text)
 
                 if score > best_score:
                     best_score = score
-                    best_start_time = segments[start]["start"]
+                    # Use first word start if available for higher precision
+                    if segments[start].get("words") and len(segments[start]["words"]) > 0:
+                        best_start_time = segments[start]["words"][0]["start"]
+                    else:
+                        best_start_time = segments[start]["start"]
                     best_end_idx = end
 
-        # Accept match if score is reasonable
+        # 4. Resolve match
         if best_score >= 0.25:
-            results.append((best_start_time, lyric_line))
+            # Good match found
+            final_time = best_start_time + OFFSET
+            results.append((max(0, final_time), lyric_line))
             last_end_time = segments[best_end_idx]["end"]
             seg_idx = best_end_idx + 1
         else:
-            # Low confidence — use the next segment's timestamp anyway
-            # (Whisper might have transcribed it very differently)
-            results.append((segments[seg_idx]["start"], lyric_line))
+            # Low confidence match - use the next available segment but flag it?
+            # In karaoke, it's better to have a timestamped lyric even if wrong
+            final_time = segments[seg_idx]["start"] + OFFSET
+            results.append((max(0, final_time), lyric_line))
             last_end_time = segments[seg_idx]["end"]
             seg_idx += 1
+
+    return results
 
     return results
 
@@ -270,8 +293,8 @@ def main():
     parser = argparse.ArgumentParser(description="Auto Sync Lyrics Tool")
     parser.add_argument("input", help="Path to lyrics .txt file")
     parser.add_argument(
-        "--model", default="small",
-        help="Whisper model size: tiny, base, small, medium, large (default: small)"
+        "--model", default="medium",
+        help="Whisper model size: tiny, base, small, medium, large (default: medium)"
     )
     parser.add_argument(
         "--output", default="output",
