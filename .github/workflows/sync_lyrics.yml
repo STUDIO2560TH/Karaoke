@@ -80,5 +80,4 @@ jobs:
           git add output/
           git add lyrics/
           git status
-          git diff --cached --quiet || git commit -m "🎶 Auto-synced lyrics subtitles"
-          git push
+          git diff --cached --quiet || (git commit -m "🎶 Auto-synced lyrics subtitles" && git pull --rebase && git push)
