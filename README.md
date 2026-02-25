@@ -32,8 +32,8 @@ Third lyrics line
 
 If you see an error about **"Sign in to confirm you're not a bot"** in GitHub Actions, you can upload your own song file:
 
-1. Follow the steps above but ALSO upload a song file (e.g., **`SongName.mp3`** or **`SongName.wav`**).
-2. The file MUST have the **exact same name** as your lyrics file (but with an audio extension like `.mp3`).
+1. Follow the steps above but **upload BOTH** the lyrics file (e.g., `SongName.txt`) and the song file (e.g., `SongName.mp3`) **at the same time** (in one upload/commit).
+2. The files MUST have the **exact same name** (e.g., `โต๊ะริม.txt` and `โต๊ะริม.mp3`).
 3. The script will find your file and use it instead of trying to download from YouTube.
 
 ### 3. Get results
