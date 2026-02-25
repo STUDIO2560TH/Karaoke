@@ -212,12 +212,12 @@ def similarity(a: str, b: str) -> float:
     score = SequenceMatcher(None, na, nb).ratio()
     
     # If score is low, try aggressive (consonant-only) matching
-    if score < 0.6:
+    if score < 0.4:
         na_aggr = normalize_text(a, aggressive=True)
         nb_aggr = normalize_text(b, aggressive=True)
         if na_aggr and nb_aggr:
             aggr_score = SequenceMatcher(None, na_aggr, nb_aggr).ratio()
-            score = max(score, aggr_score * 0.8) # Weight aggressive score slightly lower
+            score = max(score, aggr_score * 0.75) 
             
     return score
 
@@ -259,7 +259,7 @@ def match_lyrics_to_segments(
     
     for l_idx, lyric_line in enumerate(user_lyrics):
         if is_instrumental(lyric_line):
-            matches.append((l_idx, -1, -1, 1.0)) # Magic value for instrumentals
+            matches.append((l_idx, -1, -1, 1.0))
             continue
 
         if word_idx >= len(all_words):
@@ -271,11 +271,11 @@ def match_lyrics_to_segments(
         best_end = all_words[word_idx]["end"]
         best_w_idx = word_idx
         
-        # Look ahead window (up to 40 words)
-        look_ahead = min(word_idx + 40, len(all_words))
+        # Look ahead window
+        look_ahead = min(word_idx + 60, len(all_words))
         for start in range(word_idx, look_ahead):
             combined = ""
-            for end in range(start, min(start + 12, len(all_words))):
+            for end in range(start, min(start + 15, len(all_words))):
                 combined += all_words[end]["text"]
                 score = similarity(lyric_line, combined)
                 if score > best_score:
@@ -283,16 +283,21 @@ def match_lyrics_to_segments(
                     best_start = all_words[start]["start"]
                     best_end = all_words[end]["end"]
                     best_w_idx = end
-            if best_score > 0.9: break # Short circuit on perfect match
+            if best_score > 0.9: break
 
-        if best_score >= 0.25:
+        if best_score >= 0.20:
+            print(f"  [Match] Line {l_idx+1}: '{lyric_line[:20]}...' -> {format_time(best_start)} (conf: {best_score:.2f})")
             matches.append((l_idx, best_start, best_end, best_score))
-            word_idx = best_w_idx + 1
+            word_idx = max(word_idx + 1, best_w_idx - 1)
         else:
+            print(f"  [Miss]  Line {l_idx+1}: '{lyric_line[:20]}...' (best conf: {best_score:.2f})")
             matches.append((l_idx, None, None, 0.0))
+            # Forced advancement: If we have many misses, slowly nudge word_idx
+            # but for global alignment, we can also stay put and let interpolation work.
 
-    # Second pass: Interpolation for missing timestamps
-    total_audio_duration = segments[-1]["end"] if segments else 0.0
+    # 2. Second pass: Interpolation for missing timestamps
+    # Fallback duration if AI found nothing
+    total_audio_duration = segments[-1]["end"] if segments else 180.0
     
     final_results = []
     for i in range(len(matches)):
@@ -300,46 +305,34 @@ def match_lyrics_to_segments(
         lyric_text = user_lyrics[l_idx]
         
         if start is not None and start != -1:
-            # High confidence match
             final_results.append((max(0, start + OFFSET), lyric_text))
             last_word_time = end
-        elif start == -1:
-            # Instrumental - keep it near the last vocal or slightly after
+        elif start == -1: # Instrumental
             final_results.append((max(0, last_word_time + OFFSET), lyric_text))
         else:
-            # Missing match - Interpolate!
-            # Find next valid match to determine the gap
+            # Interpolate!
             next_valid = None
-            consecutive_missing = 0
-            for j in range(i, len(matches)):
+            for j in range(i + 1, len(matches)):
                 if matches[j][1] is not None and matches[j][1] != -1:
                     next_valid = matches[j]
                     break
-                consecutive_missing += 1
             
             if next_valid:
-                # Interpolate between last_word_time and next_valid[1]
                 gap = next_valid[1] - last_word_time
-                # We are at the 'k-th' missing line in a block of 'consecutive_missing'
-                # But since we're in a loop, we can just take the first 'step'
-                # Find how many missing lines are in THIS specific block
                 block_size = 0
                 for j in range(i, len(matches)):
                     if matches[j][1] is not None and matches[j][1] != -1: break
                     block_size += 1
                 
-                # Distribution constant: spread them out
                 increment = gap / (block_size + 1)
                 est_time = last_word_time + increment
                 final_results.append((max(0, est_time + OFFSET), lyric_text))
                 last_word_time = est_time
             else:
-                # No more valid matches - just tiny steps to end of audio
-                remaining_lines = 0
-                for j in range(i, len(matches)): remaining_lines += 1
-                
-                time_to_end = max(1.0, total_audio_duration - last_word_time)
-                increment = time_to_end / (remaining_lines + 1)
+                # No more matches - split remaining time proportionally
+                remaining_lines = len(matches) - i
+                time_to_end = max(10.0, total_audio_duration - last_word_time)
+                increment = time_to_end / (remaining_lines + 2)
                 est_time = last_word_time + increment
                 final_results.append((max(0, est_time + OFFSET), lyric_text))
                 last_word_time = est_time
@@ -374,8 +367,8 @@ def main():
     parser = argparse.ArgumentParser(description="Auto Sync Lyrics Tool")
     parser.add_argument("input", help="Path to lyrics .txt file")
     parser.add_argument(
-        "--model", default="large-v3",
-        help="Whisper model size: tiny, base, small, medium, large-v3 (default: large-v3)"
+        "--model", default="medium",
+        help="Whisper model size: tiny, base, small, medium, large-v3 (default: medium)"
     )
     parser.add_argument(
         "--output", default="output",
