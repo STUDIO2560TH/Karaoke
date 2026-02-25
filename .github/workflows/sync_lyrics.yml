@@ -3,7 +3,8 @@ name: Sync Lyrics
 on:
   push:
     paths:
-      - 'lyrics/*.txt'
+      - 'lyrics/**'
+      - '!lyrics/.gitkeep'
   workflow_dispatch:
 
 permissions:
@@ -21,10 +22,12 @@ jobs:
       - name: Check for lyrics files
         id: check
         run: |
-          if ls lyrics/*.txt 1>/dev/null 2>&1; then
+          # Find all files except .gitkeep
+          files=$(find lyrics -type f ! -name ".gitkeep")
+          if [ -n "$files" ]; then
             echo "found=true" >> $GITHUB_OUTPUT
             echo "Found lyrics files to process:"
-            ls -la lyrics/*.txt
+            echo "$files"
           else
             echo "found=false" >> $GITHUB_OUTPUT
             echo "No lyrics files found in lyrics/ folder"
@@ -49,7 +52,7 @@ jobs:
       - name: Process lyrics files
         if: steps.check.outputs.found == 'true'
         run: |
-          for file in lyrics/*.txt; do
+          find lyrics -type f ! -name ".gitkeep" | while read file; do
             echo "========================================"
             echo "Processing: $file"
             echo "========================================"
@@ -60,10 +63,8 @@ jobs:
       - name: Delete processed lyrics files
         if: steps.check.outputs.found == 'true'
         run: |
-          for file in lyrics/*.txt; do
-            rm "$file"
-            echo "Deleted: $file"
-          done
+          find lyrics -type f ! -name ".gitkeep" -delete
+          echo "Processed files deleted."
 
       - name: Commit and push results
         if: steps.check.outputs.found == 'true'
