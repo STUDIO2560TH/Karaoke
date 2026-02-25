@@ -357,24 +357,42 @@ def parse_lyrics_file(filepath: str) -> tuple[str, list[str], float, str, str]:
     model_size = None
     language = None
     
-    with open(filepath, "r", encoding="utf-8") as f:
+    # Use utf-8-sig to automatically handle BOM if present
+    with open(filepath, "r", encoding="utf-8-sig") as f:
         for line in f:
             stripped = line.strip()
             if not stripped: continue
             
-            if stripped.lower().startswith("url:"):
-                url = stripped[4:].strip()
-            elif stripped.lower().startswith("offset:"):
-                try:
-                    offset = float(stripped[7:].strip())
-                except ValueError:
-                    print(f"WARNING: Invalid offset value in file: {stripped}")
-            elif stripped.lower().startswith("model:"):
-                model_size = stripped[6:].strip()
-            elif stripped.lower().startswith("lang:"):
-                language = stripped[5:].strip()
-            else:
-                lyrics.append(stripped)
+            # More flexible tag parsing using regex or better string checks
+            lower_line = stripped.lower()
+            
+            if lower_line.startswith("url"):
+                # Handle "url:", "url :", etc.
+                match = re.match(r"^url\s*:\s*(.*)$", stripped, re.IGNORECASE)
+                if match:
+                    url = match.group(1).strip()
+                    continue
+            elif lower_line.startswith("offset"):
+                match = re.match(r"^offset\s*:\s*(.*)$", stripped, re.IGNORECASE)
+                if match:
+                    try:
+                        offset = float(match.group(1).strip())
+                    except ValueError:
+                        print(f"WARNING: Invalid offset value in file: {stripped}")
+                    continue
+            elif lower_line.startswith("model"):
+                match = re.match(r"^model\s*:\s*(.*)$", stripped, re.IGNORECASE)
+                if match:
+                    model_size = match.group(1).strip()
+                    continue
+            elif lower_line.startswith("lang"):
+                match = re.match(r"^lang\s*:\s*(.*)$", stripped, re.IGNORECASE)
+                if match:
+                    language = match.group(1).strip()
+                    continue
+            
+            # If it's not a tag, it's a lyrics line
+            lyrics.append(stripped)
     
     return url, lyrics, offset, model_size, language
 
