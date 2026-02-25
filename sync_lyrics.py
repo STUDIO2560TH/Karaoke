@@ -310,58 +310,62 @@ def match_lyrics_to_segments(
             matches.append((l_idx, None, None, 0.0))
 
     # 2. Second pass: Interpolation for missing timestamps
-    # Fallback duration if AI found nothing
     audio_end = segments[-1]["end"] if segments else all_words[-1]["end"] if all_words else 180.0
     
     final_results = []
-    for i in range(len(matches)):
+    last_word_time = 0.0
+    i = 0
+    while i < len(matches):
         l_idx, start, end, score = matches[i]
         lyric_text = user_lyrics[l_idx]
         
-        if start is not None and start != -1:
-            # Ensure we don't go backwards or clump too much
-            final_time = max(last_word_time + 0.5, start)
-            final_results.append((max(0, final_time + OFFSET), lyric_text))
-            last_word_time = max(final_time, end)
-        elif start == -1: # Instrumental
-            final_results.append((max(0, last_word_time + OFFSET), lyric_text))
-        else:
-            # Interpolate!
-            next_valid = None
-            for j in range(i + 1, len(matches)):
-                if matches[j][1] is not None and matches[j][1] != -1:
-                    next_valid = matches[j]
-                    break
-            
-            if next_valid:
-                gap = next_valid[1] - last_word_time
-                block_size = 0
-                for j in range(i, len(matches)):
-                    if matches[j][1] is not None and matches[j][1] != -1: break
-                    block_size += 1
-                
-                # Split the gap evenly, but ensure a reasonable spread
-                increment = gap / (block_size + 1)
-                # Ensure minimum 1.5s spacing for interpolated lines to avoid clumping
-                increment = max(1.5, increment)
-                est_time = last_word_time + increment
-                
-                # Safety check: don't overshoot the next valid match
-                if est_time >= next_valid[1] - 0.5:
-                    est_time = next_valid[1] - (block_size - (i - matches.index((l_idx, start, end, score)))) * 0.5
-
-                final_results.append((max(0, est_time + OFFSET), lyric_text))
-                last_word_time = est_time
+        # If it's a match (or magic instrumental)
+        if (start is not None and start != -1) or start == -1:
+            if start == -1: # Instrumental
+                final_results.append((max(0, last_word_time + OFFSET), lyric_text))
             else:
-                # No more matches - spread to the end of audio with min 2.0s spacing
-                remaining_lines = len(matches) - i
-                time_to_end = max(10.0, audio_end - last_word_time)
+                # High confidence match
+                final_time = max(last_word_time + 0.5, start)
+                final_results.append((max(0, final_time + OFFSET), lyric_text))
+                last_word_time = max(final_time, end)
+            i += 1
+        else:
+            # Block of missing matches - find how many
+            j = i
+            while j < len(matches) and matches[j][1] is None:
+                j += 1
+            
+            num_missing = j - i
+            
+            # Find next anchor point
+            next_anchor_time = audio_end
+            if j < len(matches):
+                if matches[j][1] != -1: # Valid match
+                    next_anchor_time = matches[j][1]
+                else: # Instrumental
+                    # Keep looking for a real timestamp
+                    for k in range(j, len(matches)):
+                        if matches[k][1] is not None and matches[k][1] != -1:
+                            next_anchor_time = matches[k][1]
+                            break
+            
+            # Distribute num_missing lines between last_word_time and next_anchor_time
+            gap = next_anchor_time - last_word_time
+            # Standard spacing: divide gap by lines+1. But enforce MINIMUM 1.5s gap.
+            spacing = max(1.5, gap / (num_missing + 1))
+            
+            for k in range(num_missing):
+                est_time = last_word_time + (k + 1) * spacing
+                # Safety: ensure we don't bunch up against the next anchor
+                if est_time >= next_anchor_time - 0.5:
+                    # Compress the remaining missing lines at 0.5s intervals if we run out of space
+                    est_time = next_anchor_time - (num_missing - k) * 0.5
                 
-                # Aim for even distribution but clamp to min 2s
-                increment = max(2.5, time_to_end / (remaining_lines + 2))
-                est_time = last_word_time + increment
-                final_results.append((max(0, est_time + OFFSET), lyric_text))
-                last_word_time = est_time
+                final_results.append((max(0, est_time + OFFSET), user_lyrics[matches[i + k][0]]))
+            
+            # Update last_word_time to the point we just "filled" up to
+            last_word_time = last_word_time + num_missing * spacing
+            i = j
 
     return final_results
 
@@ -424,13 +428,29 @@ def format_time(seconds: float) -> str:
 
 
 def generate_lua_subtitles(matched: list[tuple[float, str]]) -> str:
-    """Generate the Lua Subtitles table from matched lyrics."""
+    """Generate the Lua Subtitles table, merging lines with identical timestamps."""
+    # First, collect and merge lines by their formatted M:SS time string
+    merged = {}
+    ordered_keys = []
+    
+    for timestamp, lyric in matched:
+        time_str = format_time(timestamp)
+        if time_str not in merged:
+            merged[time_str] = lyric
+            ordered_keys.append(time_str)
+        else:
+            # Merge duplicate timestamps with a space (user request)
+            if not lyric.startswith("(") and not merged[time_str].endswith(")"):
+                merged[time_str] += " " + lyric
+            else:
+                merged[time_str] += " " + lyric
+
     lines = []
     lines.append('["Subtitles"] =')
     lines.append('{')
 
-    for timestamp, lyric in matched:
-        time_str = format_time(timestamp)
+    for time_str in ordered_keys:
+        lyric = merged[time_str]
         # Escape special Lua characters in lyrics
         escaped = lyric.replace('\\', '\\\\').replace('"', '\\"')
         lines.append(f'\t["{time_str}"] = "{escaped}",')
