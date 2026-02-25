@@ -1,2 +1,4 @@
 faster-whisper==1.1.0
 yt-dlp>=2024.0
+requests
+huggingface-hub
