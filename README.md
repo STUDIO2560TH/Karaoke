@@ -25,7 +25,7 @@ Second lyrics line
 Third lyrics line
 ...
 ```
-- First line: `url:` followed by the YouTube URL (required, even if you upload your own audio).
+- First line (Optional): `url:` followed by the YouTube URL.
 - `🎶` marks instrumental/music sections.
 
 ### 2. Bypass YouTube blocks (Optional)

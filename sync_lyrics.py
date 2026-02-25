@@ -36,10 +36,10 @@ def parse_lyrics_file(filepath: str) -> tuple[str, list[str]]:
             elif line:
                 lyrics.append(line)
 
+    # If not url, we'll assume the user is providing a local file
     if not url:
-        print(f"ERROR: No 'url:' line found in {filepath}")
-        sys.exit(1)
-
+        print(f"NOTE: No 'url:' line found in {filepath}. Script will strictly require a local audio file.")
+    
     if not lyrics:
         print(f"ERROR: No lyrics found in {filepath}")
         sys.exit(1)
@@ -83,7 +83,12 @@ def download_audio(url: str, output_path: str, song_name: str, lyrics_dir: str =
             print("ERROR: Failed to prepare local audio file.")
             sys.exit(1)
 
-    # Step 1: Download from YouTube if no local file
+    # Step 1: Download from YouTube if no local file (only if URL is provided)
+    if not url:
+        print("ERROR: No YouTube URL provided and no matching local audio file found.")
+        print(f"Place a song file (e.g. {song_name}.mp3) in the same folder as your lyrics.")
+        sys.exit(1)
+
     audio_file = os.path.join(output_path, "audio.wav")
 
     cmd = [
