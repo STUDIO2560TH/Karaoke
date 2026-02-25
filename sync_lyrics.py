@@ -143,7 +143,7 @@ def download_audio(url: str, output_path: str, song_name: str, lyrics_dir: str =
     return audio_file
 
 
-def transcribe_audio(audio_path: str, model_size: str = "small") -> list[dict]:
+def transcribe_audio(audio_path: str, model_size: str = "medium", language: str = None) -> list[dict]:
     """
     Transcribe audio using faster-whisper.
     Returns list of segments: [{"start": float, "end": float, "text": str}, ...]
@@ -151,22 +151,29 @@ def transcribe_audio(audio_path: str, model_size: str = "small") -> list[dict]:
     from faster_whisper import WhisperModel
 
     print(f"Loading Whisper model '{model_size}' (this may take a moment)...")
+    # Use float16 if possible, else int8
     model = WhisperModel(model_size, device="cpu", compute_type="int8")
 
-    print("Transcribing audio (Thai language)...")
+    print(f"Transcribing audio (Language: {language if language else 'Auto-detect'})...")
     segments_gen, info = model.transcribe(
         audio_path,
-        language="th",
+        language=language, # Now configurable!
         beam_size=5,
-        word_timestamps=True,  # Precision improvement
+        word_timestamps=True,
         vad_filter=True,
         vad_parameters=dict(
-            min_silence_duration_ms=400,  # Adjusted for singing
+            min_silence_duration_ms=500,
         ),
     )
+    
+    # Log detected language if auto-detect was used
+    if not language:
+        print(f"  Detected language: '{info.language}' (probability: {info.language_probability:.2f})")
 
     segments = []
+    full_text_debug = ""
     for seg in segments_gen:
+        full_text_debug += seg.text + " "
         words = []
         if seg.words:
             for w in seg.words:
@@ -182,9 +189,10 @@ def transcribe_audio(audio_path: str, model_size: str = "small") -> list[dict]:
             "text": seg.text.strip(),
             "words": words
         })
-        print(f"  [{format_time(seg.start)}] {seg.text.strip()}")
+        # print(f"  [{format_time(seg.start)}] {seg.text.strip()}")
 
-    print(f"Found {len(segments)} segments")
+    print(f"Found {len(segments)} segments. Raw transcription preview:")
+    print(f"  {full_text_debug[:300]}...")
     return segments
 
 
@@ -272,7 +280,7 @@ def match_lyrics_to_segments(
         best_w_idx = word_idx
         
         # Look ahead window
-        look_ahead = min(word_idx + 60, len(all_words))
+        look_ahead = min(word_idx + 80, len(all_words)) # Increased lookahead
         for start in range(word_idx, look_ahead):
             combined = ""
             for end in range(start, min(start + 15, len(all_words))):
@@ -285,7 +293,8 @@ def match_lyrics_to_segments(
                     best_w_idx = end
             if best_score > 0.9: break
 
-        if best_score >= 0.20:
+        # Lower threshold for complex singing, but require some substance
+        if best_score >= 0.12: # Even more permissive
             print(f"  [Match] Line {l_idx+1}: '{lyric_line[:20]}...' -> {format_time(best_start)} (conf: {best_score:.2f})")
             matches.append((l_idx, best_start, best_end, best_score))
             word_idx = max(word_idx + 1, best_w_idx - 1)
@@ -340,6 +349,36 @@ def match_lyrics_to_segments(
     return final_results
 
 
+def parse_lyrics_file(filepath: str) -> tuple[str, list[str], float, str, str]:
+    """Parse the lyrics file for URL, lyrics lines, offset, model, and language."""
+    url = None
+    lyrics = []
+    offset = 0.0
+    model_size = None
+    language = None
+    
+    with open(filepath, "r", encoding="utf-8") as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped: continue
+            
+            if stripped.lower().startswith("url:"):
+                url = stripped[4:].strip()
+            elif stripped.lower().startswith("offset:"):
+                try:
+                    offset = float(stripped[7:].strip())
+                except ValueError:
+                    print(f"WARNING: Invalid offset value in file: {stripped}")
+            elif stripped.lower().startswith("model:"):
+                model_size = stripped[6:].strip()
+            elif stripped.lower().startswith("lang:"):
+                language = stripped[5:].strip()
+            else:
+                lyrics.append(stripped)
+    
+    return url, lyrics, offset, model_size, language
+
+
 def format_time(seconds: float) -> str:
     """Convert seconds to M:SS format (e.g., 1:35)."""
     minutes = int(seconds) // 60
@@ -387,7 +426,7 @@ def main():
         return
 
     # Parse lyrics file
-    url, lyrics, file_offset, file_model = parse_lyrics_file(str(input_path))
+    url, lyrics, file_offset, file_model, file_lang = parse_lyrics_file(str(input_path))
     
     # Priority: model from file > model from command line argument
     model_to_use = file_model if file_model else args.model
@@ -398,6 +437,7 @@ def main():
     print(f"Lyrics lines: {len(lyrics)}")
     print(f"Sync Offset: {file_offset}s")
     print(f"Whisper Model: {model_to_use}")
+    print(f"Language: {file_lang if file_lang else 'Auto-detect'}")
     print()
 
     # Create temp directory for audio
@@ -410,7 +450,7 @@ def main():
         print()
 
         # Step 2: Transcribe with Whisper
-        segments = transcribe_audio(audio_file, model_to_use)
+        segments = transcribe_audio(audio_file, model_to_use, file_lang)
         print()
 
         # Step 3: Match lyrics to segments
