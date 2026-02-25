@@ -4,11 +4,17 @@ Auto sync Thai song lyrics with timestamps for the Roblox karaoke module.
 
 ## How to Use
 
-### 1. Create a lyrics file
+### 1. Upload lyrics to GitHub
 
-Add a `.txt` file in the `lyrics/` folder. The filename will be the song name.
+The easiest way is to use the GitHub website directly:
 
-**Format:**
+1. Open your repository on **GitHub.com**.
+2. Go into the **`lyrics`** folder.
+3. Click **Add file** -> **Upload files**.
+4. Drag and drop your `.txt` file into the box.
+5. Click **Commit changes**.
+
+**Format for the `.txt` file:**
 ```
 url: https://www.youtube.com/watch?v=VIDEO_ID
 
@@ -19,20 +25,10 @@ Second lyrics line
 Third lyrics line
 ...
 ```
+- First line: `url:` followed by the YouTube URL.
+- `🎶` marks instrumental/music sections.
 
-- First line: `url:` followed by the YouTube URL
-- `🎶` marks instrumental/music sections
-- Each line = one subtitle entry
-
-### 2. Push to GitHub
-
-```bash
-git add lyrics/
-git commit -m "Add song lyrics"
-git push
-```
-
-### 3. Get results
+### 2. Get results
 
 The GitHub Action will:
 1. Download the audio from YouTube
