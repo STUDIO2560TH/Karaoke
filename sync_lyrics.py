@@ -155,20 +155,22 @@ def transcribe_audio(audio_path: str, model_size: str = "medium", language: str 
     model = WhisperModel(model_size, device="cpu", compute_type="int8")
 
     print(f"Transcribing audio (Language: {language if language else 'Auto-detect'})...")
+    
+    # Disable VAD filter by default for singing - it's too aggressive and often finds 0 segments
     segments_gen, info = model.transcribe(
         audio_path,
-        language=language, # Now configurable!
+        language=language,
         beam_size=5,
         word_timestamps=True,
-        vad_filter=True,
-        vad_parameters=dict(
-            min_silence_duration_ms=500,
-        ),
+        vad_filter=False, # DISABLED: VAD eats singing
     )
     
     # Log detected language if auto-detect was used
     if not language:
         print(f"  Detected language: '{info.language}' (probability: {info.language_probability:.2f})")
+        # If auto-detect finds English with low probability, it's a common hallucination for Thai/Music
+        if info.language == "en" and info.language_probability < 0.6:
+            print("  [Note] Auto-detect might be wrong. If sync fails, add 'lang: th' to your file.")
 
     segments = []
     full_text_debug = ""
@@ -394,6 +396,8 @@ def parse_lyrics_file(filepath: str) -> tuple[str, list[str], float, str, str]:
                 match = re.match(r"^lang\s*:\s*(.*)$", stripped, re.IGNORECASE)
                 if match:
                     language = match.group(1).strip()
+                    # Common Thai aliases
+                    if language.lower() in ("thai", "th-th"): language = "th"
                     continue
             
             # If it's not a tag, it's a lyrics line
