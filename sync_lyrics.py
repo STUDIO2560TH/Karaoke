@@ -298,8 +298,8 @@ def match_lyrics_to_segments(
                     best_w_idx = end
             if best_score > 0.9: break
 
-        # Pass criteria
-        if best_score >= 0.12:
+        # Pass criteria - raise Skeleton threshold slightly to avoid noise clumping
+        if best_score >= 0.18:
             conf_str = "Strict" if best_score > 0.6 else "Fuzzy" if best_score > 0.3 else "Skeleton"
             print(f"  [{conf_str}] Line {l_idx+1}: '{lyric_line[:15]}...' -> {format_time(best_start)} (conf: {best_score:.2f})")
             matches.append((l_idx, best_start, best_end, best_score))
@@ -313,6 +313,7 @@ def match_lyrics_to_segments(
     audio_end = segments[-1]["end"] if segments else all_words[-1]["end"] if all_words else 180.0
     
     final_results = []
+    # Base offset (e.g. -0.2s or -0.3s) helps visuals leading slightly
     last_word_time = 0.0
     
     i = 0
@@ -320,57 +321,58 @@ def match_lyrics_to_segments(
         l_idx, start, end, score = matches[i]
         lyric_text = user_lyrics[l_idx]
         
-        # If it's a high-confidence match
-        if start is not None and start != -1:
-            # Detect long gaps before this match to insert music bridge
-            if start - last_word_time > 8.0:
-                final_results.append((last_word_time + 1.5, "🎶"))
+        # 1. High-confidence match or manual music break "🎶"
+        if (start is not None and start != -1) or is_instrumental(lyric_text):
+            # MONOTONE: Never move backwards. Minimum 1.0s gap between lines.
+            final_start = max(last_word_time + 1.0, start if start != -1 else last_word_time + 1.0)
             
-            # Ensure we always move forward by at least 1.0s to avoid clumping
-            final_time = max(last_word_time + 1.0, start)
-            final_results.append((max(0, final_time + OFFSET), lyric_text))
-            last_word_time = max(final_time + 0.5, end)
-            i += 1
-        elif start == -1: # User provided instrumental 🎶
-            final_results.append((max(0, last_word_time + 1.0 + OFFSET), lyric_text))
-            last_word_time += 1.5
+            # Auto-insert music bridge for huge gaps (e.g. 10s of silence)
+            if start != -1 and start - last_word_time > 10.0:
+                final_results.append((last_word_time + 1.5 + OFFSET, "🎶"))
+            
+            final_results.append((final_start + OFFSET, lyric_text))
+            last_word_time = max(final_start, end if end != -1 else final_start + 1.0)
             i += 1
         else:
-            # Block of missing matches
+            # 2. Sequential block of missing matches
             j = i
-            while j < len(matches) and (matches[j][1] is None or matches[j][1] == -1):
+            while j < len(matches) and matches[j][1] is None and not is_instrumental(user_lyrics[matches[j][0]]):
                 j += 1
-                if j < len(matches) and is_instrumental(user_lyrics[matches[j][0]]):
-                    break
             
             num_missing = j - i
+            
+            # Find the next reliable timestamp to aim for
             next_anchor = audio_end
             if j < len(matches) and matches[j][1] is not None and matches[j][1] != -1:
                 next_anchor = matches[j][1]
             
-            # Gap to fill
+            # Gap available for distribution
             total_gap = next_anchor - last_word_time
             
-            # Auto-insert music break if the gap is huge relative to missing lines
-            if total_gap > (num_missing * 4.0) + 6.0:
-                final_results.append((last_word_time + 1.0, "🎶"))
+            # Auto-Music Bridge logic for large gaps with few lines
+            if total_gap > (num_missing * 5.0) + 7.0:
+                music_start = last_word_time + 1.0
+                final_results.append((music_start + OFFSET, "🎶"))
                 last_word_time += 2.0
                 total_gap -= 2.0
 
-            # Distribute missing lines
-            spacing = max(2.0, total_gap / (num_missing + 1))
+            # Distribute lines
+            # Ensure at least 2.5s spacing for miss cases (likely silence or instrumental)
+            spacing = max(2.5, total_gap / (num_missing + 1))
             
             for k in range(num_missing):
                 est_time = last_word_time + spacing
-                # Clamp to avoid overshooting
+                # MONOTONE: Do not overshoot next anchor
                 if est_time >= next_anchor - 1.0:
                     est_time = next_anchor - 1.0
                 
-                final_results.append((max(0, est_time + OFFSET), user_lyrics[matches[i+k][0]]))
+                final_results.append((est_time + OFFSET, user_lyrics[matches[i+k][0]]))
                 last_word_time = est_time
             
             i = j
 
+    # Step 3: Global Sort to be 100% sure we are monotone before Lua generation
+    final_results.sort(key=lambda x: x[0])
     return final_results
 
 
