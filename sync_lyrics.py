@@ -319,8 +319,10 @@ def match_lyrics_to_segments(
         lyric_text = user_lyrics[l_idx]
         
         if start is not None and start != -1:
-            final_results.append((max(0, start + OFFSET), lyric_text))
-            last_word_time = end
+            # Ensure we don't go backwards or clump too much
+            final_time = max(last_word_time + 0.5, start)
+            final_results.append((max(0, final_time + OFFSET), lyric_text))
+            last_word_time = max(final_time, end)
         elif start == -1: # Instrumental
             final_results.append((max(0, last_word_time + OFFSET), lyric_text))
         else:
@@ -338,17 +340,25 @@ def match_lyrics_to_segments(
                     if matches[j][1] is not None and matches[j][1] != -1: break
                     block_size += 1
                 
-                # Split the gap evenly, but limit speed
+                # Split the gap evenly, but ensure a reasonable spread
                 increment = gap / (block_size + 1)
+                # Ensure minimum 1.5s spacing for interpolated lines to avoid clumping
+                increment = max(1.5, increment)
                 est_time = last_word_time + increment
+                
+                # Safety check: don't overshoot the next valid match
+                if est_time >= next_valid[1] - 0.5:
+                    est_time = next_valid[1] - (block_size - (i - matches.index((l_idx, start, end, score)))) * 0.5
+
                 final_results.append((max(0, est_time + OFFSET), lyric_text))
                 last_word_time = est_time
             else:
-                # No more matches - spread to the end of audio
+                # No more matches - spread to the end of audio with min 2.0s spacing
                 remaining_lines = len(matches) - i
                 time_to_end = max(10.0, audio_end - last_word_time)
-                # Ensure we don't bunch up everything at the end
-                increment = min(3.0, time_to_end / (remaining_lines + 2))
+                
+                # Aim for even distribution but clamp to min 2s
+                increment = max(2.5, time_to_end / (remaining_lines + 2))
                 est_time = last_word_time + increment
                 final_results.append((max(0, est_time + OFFSET), lyric_text))
                 last_word_time = est_time
@@ -457,6 +467,13 @@ def main():
     
     # Priority: model from file > model from command line argument
     model_to_use = file_model if file_model else args.model
+    
+    # NEW: Detect if lyrics are Thai to force language mode (Fixes AI English misdetection)
+    if not file_lang:
+        thai_char_count = len(re.findall(r'[\u0E00-\u0E7F]', "".join(lyrics)))
+        if thai_char_count > 50:
+            file_lang = "th"
+            print("  [Auto] Thai text detected. Forcing Whisper to 'th' mode for accuracy.")
     
     print(f"Song: {input_path.stem}")
     if url:
