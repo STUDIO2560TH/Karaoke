@@ -58,7 +58,7 @@ def download_audio(url: str, output_path: str) -> str:
         "--audio-quality", "0",
         "--output", os.path.join(output_path, "audio.%(ext)s"),
         "--no-playlist",
-        "--extractor-args", "youtube:player-client=android,web",
+        "--extractor-args", "youtube:player-client=ios,web",
         "--no-check-certificate",
         "--prefer-free-formats",
         "--add-header", "Accept-Language:en-US,en;q=0.5",
