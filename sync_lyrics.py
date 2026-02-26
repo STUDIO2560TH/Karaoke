@@ -374,7 +374,9 @@ def match_lyrics_to_segments(
     
     final_results = []
     # Base offset (e.g. -0.2s or -0.3s) helps visuals leading slightly
-    last_word_time = 0.0
+    # Start from first detected speech, not 0 — avoids placing lyrics in the instrumental intro
+    first_speech_time = segments[0]["start"] if segments else 0.0
+    last_word_time = first_speech_time
     
     i = 0
     while i < len(matches):
