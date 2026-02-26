@@ -72,11 +72,24 @@ def download_audio(url: str, output_path: str, song_name: str, lyrics_dir: str =
     
     # Try to find a file with the same name as the lyrics file in the lyrics directory
     if os.path.exists(lyrics_dir):
+        # First: exact name match
         for ext in audio_extensions:
             potential_file = os.path.join(lyrics_dir, f"{song_name}{ext}")
             if os.path.exists(potential_file):
                 local_audio = potential_file
                 break
+        
+        # Fallback: fuzzy match normalizing dashes (en-dash – / em-dash — / hyphen -)
+        if not local_audio:
+            norm_name = re.sub(r'[\u2013\u2014\-]', '-', song_name).strip()
+            for f in os.listdir(lyrics_dir):
+                f_base, f_ext = os.path.splitext(f)
+                if f_ext.lower() not in [e for e in audio_extensions]:
+                    continue
+                norm_f = re.sub(r'[\u2013\u2014\-]', '-', f_base).strip()
+                if norm_f == norm_name:
+                    local_audio = os.path.join(lyrics_dir, f)
+                    break
     
     if local_audio:
         print(f"Using local audio file found: {local_audio}")
@@ -334,10 +347,15 @@ def match_lyrics_to_segments(
             else:
                 conf_str = "Strict" if best_score > 0.6 else "Fuzzy" if best_score > 0.3 else "Skeleton"
             print(f"  [{conf_str}] Line {l_idx+1}: '{lyric_line[:15]}...' -> {format_time(best_start)} (conf: {best_score:.2f})")
-            matches.append((l_idx, best_start, best_end, best_score))
-            # Only advance word_idx for forward matches, not reuse
-            if not is_reuse and word_idx < len(all_words):
-                word_idx = best_w_idx + 1
+            if is_reuse:
+                # Reuse: lyrics confirmed but timestamp is from a different section.
+                # Store None to let interpolation assign the correct chronological position.
+                matches.append((l_idx, None, None, best_score))
+            else:
+                matches.append((l_idx, best_start, best_end, best_score))
+                # Only advance word_idx for forward matches
+                if word_idx < len(all_words):
+                    word_idx = best_w_idx + 1
         else:
             print(f"  [Miss]   Line {l_idx+1}: '{lyric_line[:15]}...' (best conf: {best_score:.2f})")
             matches.append((l_idx, None, None, 0.0))
