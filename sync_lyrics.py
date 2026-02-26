@@ -308,22 +308,9 @@ def match_lyrics_to_segments(
                         best_w_idx = end
                 if best_score > 0.9: break
 
-        # Forward segment scan: match against segments AFTER current position (chronological)
-        if best_score < 0.4 and word_idx < len(all_words):
-            current_time = all_words[word_idx]["start"]
-            for seg in segments:
-                if seg["start"] < current_time - 3.0:
-                    continue  # Skip segments before current position
-                seg_score = similarity(lyric_line, seg["text"])
-                if seg_score > best_score:
-                    best_score = seg_score
-                    best_start = seg["start"]
-                    best_end = seg["end"]
-                    # NOT reuse — this is a chronologically correct match
-                if best_score > 0.9: break
-
-        # Full segment scan (fallback): match against ALL segments when forward scan exhausted
-        if best_score < 0.4 and word_idx >= len(all_words):
+        # Segment-level fallback: match against full segment texts (better for Thai)
+        # Always marked as Reuse — timestamps are interpolated to preserve chronological order
+        if best_score < 0.4:
             for seg in segments:
                 seg_score = similarity(lyric_line, seg["text"])
                 if seg_score > best_score:
@@ -369,13 +356,7 @@ def match_lyrics_to_segments(
                 matches.append((l_idx, best_start, best_end, best_score))
                 # Advance word_idx for forward matches
                 if word_idx < len(all_words):
-                    if best_w_idx > word_idx:
-                        # Word-level match: advance past matched words
-                        word_idx = best_w_idx + 1
-                    else:
-                        # Segment-level match: advance past segment's end time
-                        while word_idx < len(all_words) and all_words[word_idx]["start"] < best_end:
-                            word_idx += 1
+                    word_idx = best_w_idx + 1
         else:
             print(f"  [Miss]   Line {l_idx+1}: '{lyric_line[:15]}...' (best conf: {best_score:.2f})")
             matches.append((l_idx, None, None, 0.0))
