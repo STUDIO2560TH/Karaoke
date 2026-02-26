@@ -274,42 +274,85 @@ def match_lyrics_to_segments(
             matches.append((l_idx, -1, -1, 1.0))
             continue
 
-        if word_idx >= len(all_words):
-            matches.append((l_idx, None, None, 0.0))
-            continue
-
         best_score = 0.0
-        best_start = all_words[word_idx]["start"]
-        best_end = all_words[word_idx]["end"]
+        best_start = all_words[word_idx]["start"] if word_idx < len(all_words) else 0.0
+        best_end = all_words[word_idx]["end"] if word_idx < len(all_words) else 0.0
         best_w_idx = word_idx
+        is_reuse = False
         
-        # Look ahead window
-        look_ahead = min(word_idx + 80, len(all_words))
-        for start in range(word_idx, look_ahead):
-            combined = ""
-            # Try combining up to 15 words
-            for end in range(start, min(start + 15, len(all_words))):
-                combined += all_words[end]["text"]
-                score = similarity(lyric_line, combined)
-                if score > best_score:
-                    best_score = score
-                    best_start = all_words[start]["start"]
-                    best_end = all_words[end]["end"]
-                    best_w_idx = end
-            if best_score > 0.9: break
+        # Primary forward scan (if words remain)
+        if word_idx < len(all_words):
+            look_ahead = min(word_idx + 80, len(all_words))
+            for start in range(word_idx, look_ahead):
+                combined = ""
+                for end in range(start, min(start + 15, len(all_words))):
+                    combined += all_words[end]["text"]
+                    score = similarity(lyric_line, combined)
+                    if score > best_score:
+                        best_score = score
+                        best_start = all_words[start]["start"]
+                        best_end = all_words[end]["end"]
+                        best_w_idx = end
+                if best_score > 0.9: break
+
+        # Segment-level fallback: match against full segment texts (better for Thai)
+        if best_score < 0.4:
+            for seg in segments:
+                seg_score = similarity(lyric_line, seg["text"])
+                if seg_score > best_score:
+                    best_score = seg_score
+                    best_start = seg["start"]
+                    best_end = seg["end"]
+                    is_reuse = True
+                if best_score > 0.9: break
+
+        # Re-scan entire word pool for chorus repetitions if forward scan failed
+        if best_score < 0.4 and word_idx >= len(all_words) * 0.5:
+            rescan_best_score = 0.0
+            rescan_best_start = 0.0
+            rescan_best_end = 0.0
+            for start in range(0, len(all_words)):
+                combined = ""
+                for end in range(start, min(start + 15, len(all_words))):
+                    combined += all_words[end]["text"]
+                    score = similarity(lyric_line, combined)
+                    if score > rescan_best_score:
+                        rescan_best_score = score
+                        rescan_best_start = all_words[start]["start"]
+                        rescan_best_end = all_words[end]["end"]
+                if rescan_best_score > 0.9: break
+            # Accept reuse with lower threshold for repeated sections
+            if rescan_best_score >= 0.25 and rescan_best_score > best_score:
+                best_score = rescan_best_score
+                best_start = rescan_best_start
+                best_end = rescan_best_end
+                is_reuse = True
 
         if best_score >= 0.18:
-            conf_str = "Strict" if best_score > 0.6 else "Fuzzy" if best_score > 0.3 else "Skeleton"
+            if is_reuse:
+                conf_str = "Reuse"
+            else:
+                conf_str = "Strict" if best_score > 0.6 else "Fuzzy" if best_score > 0.3 else "Skeleton"
             print(f"  [{conf_str}] Line {l_idx+1}: '{lyric_line[:15]}...' -> {format_time(best_start)} (conf: {best_score:.2f})")
             matches.append((l_idx, best_start, best_end, best_score))
-            # FORWARD SEARCH ONLY: Always consume words. This prevents chorus confusion.
-            word_idx = best_w_idx + 1
+            # Only advance word_idx for forward matches, not reuse
+            if not is_reuse and word_idx < len(all_words):
+                word_idx = best_w_idx + 1
         else:
             print(f"  [Miss]   Line {l_idx+1}: '{lyric_line[:15]}...' (best conf: {best_score:.2f})")
             matches.append((l_idx, None, None, 0.0))
 
     # 2. Second pass: Interpolation for missing timestamps
     audio_end = segments[-1]["end"] if segments else all_words[-1]["end"] if all_words else 180.0
+    
+    # Estimate average line duration from successful matches for better interpolation
+    matched_durations = []
+    for k in range(len(matches) - 1):
+        if matches[k][1] is not None and matches[k][1] != -1 and matches[k+1][1] is not None and matches[k+1][1] != -1:
+            dur = matches[k+1][1] - matches[k][1]
+            if 1.0 < dur < 15.0:  # Reasonable line duration
+                matched_durations.append(dur)
+    avg_line_duration = sum(matched_durations) / len(matched_durations) if matched_durations else 3.5
     
     final_results = []
     # Base offset (e.g. -0.2s or -0.3s) helps visuals leading slightly
@@ -345,14 +388,24 @@ def match_lyrics_to_segments(
             
             total_gap = next_anchor - last_word_time
             
-            # Use smaller spacing (1.5s) for misses to keep it from feeling "too slow"
-            spacing = max(1.5, total_gap / (num_missing + 1))
+            # Smart spacing: use average line duration when gap is large enough,
+            # otherwise distribute evenly across the available gap.
+            if total_gap >= num_missing * avg_line_duration:
+                spacing = avg_line_duration
+            else:
+                # Distribute evenly — never less than 2s apart for readability
+                spacing = max(2.0, total_gap / (num_missing + 1))
             
             for k in range(num_missing):
                 est_time = last_word_time + spacing
-                # Safety clamp: don't crowd the next anchor if we don't have enough gap
-                if est_time >= next_anchor - 0.8:
+                # Safety clamp: don't go past audio end, but leave room for remaining lines
+                remaining = num_missing - k
+                est_time = min(est_time, audio_end - remaining * 1.5)
+                # Don't crowd the next anchor
+                if est_time >= next_anchor - 0.8 and next_anchor < audio_end:
                     est_time = next_anchor - 0.8
+                # Ensure monotonic progress even when clamped
+                est_time = max(est_time, last_word_time + 1.0)
                 
                 final_results.append((est_time + OFFSET, user_lyrics[matches[i+k][0]]))
                 last_word_time = est_time
@@ -422,28 +475,28 @@ def format_time(seconds: float) -> str:
 
 
 def generate_lua_subtitles(matched: list[tuple[float, str]]) -> str:
-    """Generate the Lua Subtitles table, merging lines with identical timestamps."""
-    # Step 1: Group by time_str
-    groups = {}
-    ordered_times = []
+    """Generate the Lua Subtitles table. Spreads colliding timestamps by 1s instead of merging."""
+    # Step 1: Assign unique timestamps — spread collisions by 1 second
+    entries = []  # (timestamp_seconds, lyric_text)
+    used_times = set()
     
     for timestamp, lyric in matched:
         t_str = format_time(timestamp)
-        if t_str not in groups:
-            groups[t_str] = []
-            ordered_times.append(t_str)
         
-        # Don't add duplicate text if it somehow matched the same thing twice
-        if lyric not in groups[t_str]:
-            groups[t_str].append(lyric)
+        # If this exact time string is taken, bump by 1 second until free
+        original_ts = timestamp
+        while t_str in used_times:
+            timestamp += 1.0
+            t_str = format_time(timestamp)
+        
+        used_times.add(t_str)
+        entries.append((t_str, lyric))
 
     # Step 2: Build the Lua table
     lines = ['["Subtitles"] =', '{']
     
-    for t_str in ordered_times:
-        combined_text = " ".join(groups[t_str])
-        # Escape special Lua characters
-        escaped = combined_text.replace('\\', '\\\\').replace('"', '\\"')
+    for t_str, lyric_text in entries:
+        escaped = lyric_text.replace('\\', '\\\\').replace('"', '\\"')
         lines.append(f'\t["{t_str}"] = "{escaped}",')
 
     lines.append('},')
